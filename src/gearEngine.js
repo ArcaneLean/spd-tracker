@@ -134,9 +134,9 @@ export function computeGearProbabilities(input) {
   };
 
   const upgradeProbTable =
-    sourceId === "golden_chest" ? GOLDEN_CHEST_UPGRADE_PROBS :
-    sourceId === "tombstone"    ? CRYPT_ROOM_UPGRADE_PROBS   :
-    sourceId === "flock_trap"   ? FLOCK_TRAP_UPGRADE_PROBS   :
+    sourceId === "golden_chest"                              ? GOLDEN_CHEST_UPGRADE_PROBS :
+    sourceId === "tombstone"                                 ? CRYPT_ROOM_UPGRADE_PROBS   :
+    (sourceId === "flock_trap" || sourceId === "sentry_room") ? FLOCK_TRAP_UPGRADE_PROBS   :
     GEAR_UPGRADE_PROBS;
 
   const upgradeLevel = upgradeProbTable.map(e => ({
@@ -149,8 +149,9 @@ export function computeGearProbabilities(input) {
   if (sourceId === "tombstone") {
     // CryptRoom: always cursed — ParchmentScrap irrelevant.
     effect = [{ label: "cursed", probability: 1.0 }];
-  } else if (sourceId === "flock_trap") {
-    // Flock Trap Room: curse explicitly removed, cursed=false, cursedKnown=true.
+  } else if (sourceId === "flock_trap" || sourceId === "sentry_room") {
+    // Flock Trap Room / Sentry Room: curse explicitly removed, cursed=false, cursedKnown=true.
+    // ✅ VERIFIED: SentryRoom.java — hasCurseGlyph() → inscribe(null); cursed=false; cursedKnown=true
     // Redistribute cursed probability to plain; enchanted/inscribed unchanged.
     // ParchmentScrap irrelevant for this source (curse removal overrides it).
     const baseTable = category === "armor" ? ARMOR_EFFECT_PROBS : WEAPON_EFFECT_PROBS;

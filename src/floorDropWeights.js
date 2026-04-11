@@ -1,4 +1,4 @@
-// ── Potion drop weights ✅ VERIFIED from Generator.java ───────────────────────
+// ── Potion drop weights ✅ VERIFIED from Generator.java, Dungeon.java ─────────
 //
 // SPD uses two alternating decks. Each deck is a weighted pool; when exhausted
 // it resets to the other deck. The weights here are the average of both decks
@@ -8,17 +8,20 @@
 //   POTION.defaultProbs  = { 0, 3, 2, 1, 2, 1, 1, 1, 1, 1, 1, 1 }
 //   POTION.defaultProbs2 = { 0, 3, 2, 2, 1, 2, 1, 1, 1, 1, 1, 0 }
 //
-// weight: 0 means the type never appears from a random drop.
-// Strength is included because a color could correspond to it before the source is known.
-//
 // Confirmed sources (all call Generator.random() — item is generated before container is chosen):
 //   ✅ Floor heap        RegularLevel.java createItems()
 //   ✅ Chest             RegularLevel.java createItems()
 //   ✅ Locked chest      RegularLevel.java createItems()
 //   ✅ Skeletal remains  RegularLevel.java createItems()
 //   ✅ Mimic             RegularLevel.java createItems()
+//
+// ⚠️ STRENGTH SPECIAL CASE — ✅ VERIFIED: Dungeon.java posNeeded(), Level.java create()
+//   PotionOfStrength weight is 0 in the Generator (never from a random drop).
+//   However, a SEPARATE guaranteed mechanism places 2 POSs per 4-floor set via
+//   addItemToSpawn() → landed as a regular floor heap, visually identical to any other potion.
+//   2 per set × 5 sets = 10 total guaranteed per run. Weight 1.0 below is a conservative approximation.
 export const POTION_WEIGHTS = [
-  { name: "Strength",      weight: 0   }, // never random — boss/quest reward only
+  { name: "Strength",      weight: 1.0 }, // ⚠️ APPROX — from guaranteed mechanism, not generator (see above)
   { name: "Healing",       weight: 3   }, // avg 3   = 20.00%
   { name: "Mind Vision",   weight: 2   }, // avg 2   = 13.33%
   { name: "Frost",         weight: 1.5 }, // avg 1.5 = 10.00%
@@ -32,7 +35,7 @@ export const POTION_WEIGHTS = [
   { name: "Experience",    weight: 0.5 }, // avg 0.5 =  3.33%
 ];
 
-// ── Scroll drop weights ✅ VERIFIED from Generator.java ───────────────────────
+// ── Scroll drop weights ✅ VERIFIED from Generator.java, Dungeon.java ────────
 //
 // Same two-deck system as potions.
 //
@@ -40,17 +43,21 @@ export const POTION_WEIGHTS = [
 //   SCROLL.defaultProbs  = { 0, 3, 2, 1, 2, 1, 1, 1, 1, 1, 1, 1 }
 //   SCROLL.defaultProbs2 = { 0, 3, 2, 2, 1, 2, 1, 1, 1, 1, 1, 0 }
 //
-// weight: 0 means the type never appears from a random drop.
-// Upgrade is included because a rune could correspond to it before the source is known.
-//
 // Confirmed sources (all call Generator.random() — item is generated before container is chosen):
 //   ✅ Floor heap        RegularLevel.java createItems()
 //   ✅ Chest             RegularLevel.java createItems()
 //   ✅ Locked chest      RegularLevel.java createItems()
 //   ✅ Skeletal remains  RegularLevel.java createItems()
 //   ✅ Mimic             RegularLevel.java createItems()
+//
+// ⚠️ UPGRADE SPECIAL CASE — ✅ VERIFIED: Dungeon.java souNeeded(), Level.java create()
+//   ScrollOfUpgrade weight is 0 in the Generator (never from a random drop).
+//   However, a SEPARATE guaranteed mechanism places 3 SOUs per 4-floor set via
+//   addItemToSpawn() → landed as a regular floor heap, visually identical to any other scroll.
+//   True probability per floor scroll is floor-and-progress-dependent (25–100% of a floor's
+//   "owed" SOU being placed). Weight 1.5 below is a conservative approximation only.
 export const SCROLL_WEIGHTS = [
-  { name: "Upgrade",       weight: 0   }, // never random — quest reward only
+  { name: "Upgrade",       weight: 1.5 }, // ⚠️ APPROX — from guaranteed mechanism, not generator (see above)
   { name: "Identify",      weight: 3   }, // avg 3   = 20.00%
   { name: "Remove Curse",  weight: 2   }, // avg 2   = 13.33%
   { name: "Mirror Image",  weight: 1.5 }, // avg 1.5 = 10.00%
@@ -133,18 +140,19 @@ export const WEAPON_EFFECT_PROBS = [
   { effect: "enchanted", probability: 0.10 }, // 10%
 ];
 
-// ── Flock Trap Room (TrapsRoom with FlockTrap) upgrade level ✅ VERIFIED from TrapsRoom.java ──
+// ── Flock Trap Room / Sentry Room upgrade level ✅ VERIFIED from TrapsRoom.java, SentryRoom.java ──
 //
-// Only appears in sewers (floors 1–4): levelTraps[Dungeon.depth/5 == 0] = {Gripping, Teleportation, Flock}
+// Flock Trap Room only appears in sewers (floors 1–4).
+// Sentry Room can appear on any floor.
+// Both use identical prize() logic:
 //
-// This source applies ONLY to the specifically-generated gear path (33% of prize rolls).
-// The player knows they're on this path because cursedKnown=true is shown on pickup.
-// If cursed status is unknown on pickup, use "chest" source instead (findPrizeItem() path).
-//
-// Source: TrapsRoom.java prize()
+// Source: TrapsRoom.java prize(), SentryRoom.java prize()
 //   Generator.randomWeapon/Armor((depth/5)+1) → .random() generates base upgrade level
 //   Curse enchant/glyph removed if present: cursed=false, cursedKnown=true
 //   Random.Int(3)==0 → prize.upgrade() (33% extra +1)
+//
+// Note: applies only when cursedKnown=true on pickup (the generated-gear path).
+// If cursed status is unknown on pickup, use "chest" source instead (findPrizeItem() path).
 //
 // Upgrade level — prior = GEAR_UPGRADE_PROBS, +1 applied 33% of the time:
 //   P(+0) = 0.75 × 2/3 = 0.500

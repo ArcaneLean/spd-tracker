@@ -25,6 +25,7 @@ import { CLASS_START_IDS } from "./classStartIds.js";
  * @property {number}                                            floor
  * @property {"+0"|"+1"|"+2"|null}                               observedLevel  - null until player inspects
  * @property {"plain"|"cursed"|"enchanted"|"inscribed"|null}     observedEffect - null until known
+ * @property {string|null}                                        itemName       - specific item name (e.g. "mail armor"), null if not recorded
  */
 
 /**
@@ -36,6 +37,16 @@ import { CLASS_START_IDS } from "./classStartIds.js";
  * @property {"potion"|"scroll"} itemType
  * @property {number}            floor
  * @property {string|null}       observedEffect - type name if revealed by use, else null
+ */
+
+/**
+ * @typedef {object} ThrownHarmless
+ * A potion that was thrown and splashed harmlessly — rules out the 6 throw-effect
+ * types (Toxic Gas, Liquid Flame, Paralytic Gas, Frost, Purity, Levitation).
+ * ✅ VERIFIED: Potion.java — base shatter() called for all potions not in
+ * mustThrowPots or canThrowPots; displays "the flask shatters and the liquid splashes harmlessly".
+ * @property {string} id    - colorId ("p3")
+ * @property {number} floor
  */
 
 /**
@@ -90,8 +101,19 @@ import { CLASS_START_IDS } from "./classStartIds.js";
  *
  * @property {GearPickup[]}        gearPickups    - all gear items recorded
  * @property {ParchmentScrapState} parchmentScrap - current trinket state
- * @property {UsedItem[]}          used           - append-only log of used items
- * @property {StoneResult[]}       stoneResults   - append-only log of Stone uses
+ * @property {UsedItem[]}          used             - append-only log of used items
+ * @property {StoneResult[]}       stoneResults     - append-only log of Stone uses
+ * @property {ThrownHarmless[]}    thrownHarmless   - potions thrown that splashed harmlessly
+ * @property {{ floor: number, potionIds: string[], scrollIds: string[] }[]} shopVisits
+ *   Shop visits recorded this run. Each entry records the floor and which potion color IDs
+ *   and scroll rune IDs were visible in the shop.
+ *   Engine constraint: shop potions use the "shop" source (guaranteed Healing boost);
+ *   shop scrolls use the "shop" source (guaranteed Identify/Remove Curse/Magic Mapping boost).
+ *
+ * @property {number[]} acknowledgedSets
+ *   Which floor-set checkpoints have been shown and dismissed (1–5).
+ *   Set 1 = F1–4, Set 2 = F6–9, …, Set 5 = F21–24.
+ *   Prevents re-showing the SetCheckpointSheet after the player has seen it.
  */
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -146,8 +168,11 @@ export function createNewRun(heroClass = null) {
     libraryRooms:   [],
     gearPickups:    [],
     parchmentScrap: { equipped: false, upgradeLevel: 0 },
-    used:          [],
-    stoneResults:  [],
+    used:           [],
+    stoneResults:   [],
+    thrownHarmless: [],
+    shopVisits:     [],
+    acknowledgedSets: [],
   };
 }
 
@@ -201,13 +226,27 @@ export function toEngineConfig() {
  */
 const FIXED_SCROLL_TYPES = new Set(["Identify", "Remove Curse"]);
 
+// Potion types that have a visible throw effect — "splashes harmlessly" rules these out.
+// ✅ VERIFIED: Potion.java mustThrowPots + canThrowPots
+export const THROW_EFFECT_TYPES = ["Toxic Gas", "Liquid Flame", "Paralytic Gas", "Frost", "Purity", "Levitation"];
+
 export function toEngineInput(state) {
   const scrollIdentified = Object.fromEntries(
     Object.entries(state.identified).filter(([id]) => id.startsWith("s"))
   );
 
-  // Start with real pickup observations, then append synthetic library constraints.
+  // Start with real pickup observations, then append synthetic shop and library constraints.
+  const potionObservations = [...state.potionPickups];
   const scrollObservations = [...state.scrollPickups];
+
+  for (const shop of (state.shopVisits ?? [])) {
+    for (const id of shop.potionIds) {
+      potionObservations.push({ id, sourceId: "shop", floor: shop.floor });
+    }
+    for (const id of shop.scrollIds) {
+      scrollObservations.push({ id, sourceId: "shop", floor: shop.floor });
+    }
+  }
 
   for (const lib of (state.libraryRooms ?? [])) {
     // If any scroll in this library is already confirmed as Identify or Remove Curse,
@@ -230,10 +269,15 @@ export function toEngineInput(state) {
       identified: Object.fromEntries(
         Object.entries(state.identified).filter(([id]) => id.startsWith("p"))
       ),
-      observations: state.potionPickups,
-      denials: state.stoneResults
-        .filter(r => !r.correct && r.id.startsWith("p"))
-        .map(({ id, guessedName }) => ({ id, guessedName })),
+      observations: potionObservations,
+      denials: [
+        ...state.stoneResults
+          .filter(r => !r.correct && r.id.startsWith("p"))
+          .map(({ id, guessedName }) => ({ id, guessedName })),
+        ...(state.thrownHarmless ?? []).flatMap(({ id }) =>
+          THROW_EFFECT_TYPES.map(guessedName => ({ id, guessedName }))
+        ),
+      ],
     },
     scrolls: {
       identified: scrollIdentified,

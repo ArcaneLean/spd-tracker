@@ -6,5 +6,8 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     host: true, // expose on LAN so you can open from phone
+    proxy: {
+      "/api": "http://localhost:3001",
+    },
   },
 });

@@ -109,6 +109,10 @@ function getLikelihood(typeName, source, weights) {
     const fixedContrib = fixedSet.has(typeName) ? fixedFraction * totalW / fixedSetSize : 0;
     return fixedContrib + (1 - fixedFraction) * w;
   }
+  if (source.method === "lab") {
+    // Source carries its own weight table — used for rooms with non-standard distributions.
+    return source.weights?.[typeName] ?? 0;
+  }
   if (source.method === "warlock") {
     if (typeName === "Healing") return 1;
     // Non-Healing path uses randomUsingDefaults(POTION) excluding Healing.

@@ -49,8 +49,20 @@ export const POTION_SOURCES = [
     note: "Standard weighted drop — same table as floor heap.",
   },
   {
+    id: "study_room",
+    label: "Study Room",
+    floors: [1, 26],
+    method: "weighted",
+    // ✅ VERIFIED: StudyRoom.java (standard room)
+    // Bookshelves + regular door + single Terrain.PEDESTAL in center.
+    // 50% chance: findPrizeItem() (artifact/stone — not a potion).
+    // 50% chance: Generator.random(Random.oneOf(POTION, SCROLL)) — standard weighted, no exclusions.
+    // When it drops a potion it is always via Generator.random → identical weights to floor drop.
+    note: "Standard weighted drop. Room may also drop a scroll or a prize item instead.",
+  },
+  {
     id: "crystal_choice",
-    label: "Crystal Choice Room",
+    label: "Crystal Choice Room (2 crystal doors)",
     floors: [1, 26],
     method: "weighted",
     // ✅ VERIFIED: CrystalChoiceRoom.java
@@ -60,6 +72,63 @@ export const POTION_SOURCES = [
     // No exclusions; standard weights apply identically to both potions and scrolls.
     // CrystalChoiceRoom is in EQUIP_SPECIALS, shuffled with no floor restriction.
     note: "Standard weighted drop. Room has 3–4 items (50/50), each randomly a potion or scroll.",
+  },
+  {
+    id: "crystal_path",
+    label: "Crystal Path Room (6 crystal doors)",
+    floors: [1, 26],
+    method: "weighted",
+    // ✅ VERIFIED: CrystalPathRoom.java
+    // 3 potions + 3 scrolls total, sorted least-to-most rare across 3 door pairs.
+    // One potion slot is 50% fixed PotionOfExperience (or exotic), rest standard weighted no dupes.
+    // Prize rooms (last pair, marked autoExplored) only accessible after opening earlier doors.
+    note: "Standard weighted. 3 potions + 3 scrolls sorted by rarity across 3 door pairs. One slot may be fixed Experience.",
+  },
+  {
+    id: "laboratory",
+    label: "Alchemy Lab (locked door — F3 or F4 each chapter)",
+    floors: [3, 4, 8, 9, 13, 14, 18, 19, 23, 24],
+    method: "weighted",
+    // ✅ VERIFIED: LaboratoryRoom.java — regular special room, Door.Type.LOCKED (iron key).
+    // prize() priority: TrinketCatalyst → PotionOfStrength (if owed) → Generator.random(50% POTION, 50% STONE).
+    // The fallback potion uses Generator.random(POTION) — standard weighted, Strength impossible.
+    // If the potion is Strength, it comes from the priority path, not the random generator.
+    note: "Fallback potion is standard weighted. Room primarily drops Strength or TrinketCatalyst first.",
+  },
+  {
+    id: "secret_lab",
+    label: "Secret Alchemy Lab (hidden door)",
+    floors: [1, 26],
+    method: "lab",
+    // ✅ VERIFIED: SecretLaboratoryRoom.java — secret room (hidden door), extends SecretRoom.
+    // Custom potionChances HashMap, 2–3 potions dropped.
+    // Strength excluded entirely. Experience heavily favored (6). Healing de-weighted (1).
+    // Each drop can become an exotic variant based on ExoticCrystals trinket chance.
+    weights: {
+      "Healing":       1,
+      "Mind Vision":   2,
+      "Frost":         3,
+      "Liquid Flame":  3,
+      "Toxic Gas":     3,
+      "Haste":         4,
+      "Invisibility":  4,
+      "Levitation":    4,
+      "Paralytic Gas": 4,
+      "Purity":        4,
+      "Experience":    6,
+    },
+    note: "Custom weights — Strength impossible, Experience most likely (6/38 ≈ 16%), Healing least likely (1/38 ≈ 3%).",
+  },
+  {
+    id: "swarm",
+    label: "Swarm of Flies",
+    floors: [3, 4, 6],
+    method: "fixed",
+    // ✅ VERIFIED: Swarm.java — loot = PotionOfHealing.class
+    // lootChance = 1/(6*(generation+1)); ~1/6 for unsplit, halves with each split.
+    // LimitedDrops.SWARM_HP counter caps total drops at 5 per run.
+    fixed: "Healing",
+    note: "Always Healing. ~1/6 drop chance (unsplit); decreases with each split. Max 5 drops per run.",
   },
   {
     id: "vampire_bat",
@@ -193,12 +262,31 @@ export const SCROLL_SOURCES = [
     note: "Standard weighted drop — same table as floor heap.",
   },
   {
+    id: "study_room",
+    label: "Study Room",
+    floors: [1, 26],
+    method: "weighted",
+    // ✅ VERIFIED: StudyRoom.java (standard room) — see POTION_SOURCES entry for full details.
+    note: "Standard weighted drop. Room may also drop a potion or a prize item instead.",
+  },
+  {
     id: "crystal_choice",
-    label: "Crystal Choice Room",
+    label: "Crystal Choice Room (2 crystal doors)",
     floors: [1, 26],
     method: "weighted",
     // ✅ VERIFIED: CrystalChoiceRoom.java — see POTION_SOURCES entry for full details.
     note: "Standard weighted drop. Room has 3–4 items (50/50), each randomly a potion or scroll.",
+  },
+  {
+    id: "crystal_path",
+    label: "Crystal Path Room (6 crystal doors)",
+    floors: [1, 26],
+    method: "weighted",
+    // ✅ VERIFIED: CrystalPathRoom.java
+    // 3 potions + 3 scrolls total, sorted least-to-most rare across 3 door pairs.
+    // One potion slot is 50% fixed PotionOfExperience (or exotic), rest standard weighted no dupes.
+    // Prize rooms (last pair) only accessible after opening earlier doors.
+    note: "Standard weighted. 3 potions + 3 scrolls sorted by rarity across 3 door pairs. One slot may be fixed Experience.",
   },
   {
     id: "dm100",

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { POTION_SOURCES, SCROLL_SOURCES } from "../sources.js";
+import { THROW_EFFECT_TYPES } from "../runState.js";
 import { POTION_WEIGHTS, SCROLL_WEIGHTS } from "../floorDropWeights.js";
-import { POTION_UNKNOWNS, SCROLL_UNKNOWNS } from "../items.js";
+import { POTION_UNKNOWNS, SCROLL_UNKNOWNS, WEAPON_ITEMS, ARMOR_ITEMS, MISSILE_ITEMS } from "../items.js";
 import { ItemSprite } from "./ItemSprite.jsx";
 
 // Sources shown for gear pickups (no floor restriction needed)
@@ -10,9 +11,11 @@ const GEAR_SOURCES = [
   { id: "chest",         label: "Chest / Skeleton" },
   { id: "golden_chest",  label: "Golden Chest (gold key)" },
   { id: "tombstone",     label: "Tombstone (Crypt Room)" },
-  { id: "flock_trap",    label: "Flock Trap Room (sewers, curse confirmed)" },
+  { id: "flock_trap",    label: "Trap Room (Levitation on floor, prize chest — curse removed)" },
+  { id: "sentry_room",   label: "Sentry Room (chest, curse confirmed)" },
   { id: "crystal_vault", label: "Crystal Vault Room (crystal key)" },
   { id: "armory",        label: "Armory Room" },
+  { id: "sacrifice_room", label: "Sacrifice Room (always cursed, one tier above normal)" },
   { id: "boss",          label: "Boss drop" },
   { id: "other",         label: "Other" },
 ];
@@ -20,6 +23,7 @@ const GEAR_SOURCES = [
 // Sources that pre-confirm the effect on pickup
 const SOURCE_CONFIRMED_EFFECTS = {
   tombstone: "cursed",
+  sacrifice_room: "cursed",
 };
 
 const GEAR_CATEGORIES = [
@@ -78,7 +82,7 @@ function ActionBtn({ onClick, children, className = "" }) {
  * }} props
  */
 export function ItemActionSheet({ itemId, run, floor, probs, onUpdate, onClose }) {
-  const [view, setView] = useState("menu"); // menu|probs|pickup|identify|use|stone|stone_result
+  const [view, setView] = useState("menu"); // menu|probs|pickup|identify|use|stone|stone_result|throw
   const [selectedName, setSelectedName] = useState(null);
 
   const isPotion = itemId.startsWith("p");
@@ -133,6 +137,13 @@ export function ItemActionSheet({ itemId, run, floor, probs, onUpdate, onClose }
     });
   }
 
+  function doThrowHarmless() {
+    mutate(r => ({
+      ...r,
+      thrownHarmless: [...(r.thrownHarmless ?? []), { id: itemId, floor }],
+    }));
+  }
+
   function doStone(name, correct) {
     mutate(r => {
       const result = { id: itemId, guessedName: name, correct };
@@ -162,6 +173,7 @@ export function ItemActionSheet({ itemId, run, floor, probs, onUpdate, onClose }
       <ActionBtn onClick={() => setView("pickup")}>🎒 Record pickup</ActionBtn>
       <ActionBtn onClick={() => setView("identify")}>🔍 Identify</ActionBtn>
       <ActionBtn onClick={() => setView("use")}>💧 Use</ActionBtn>
+      {isPotion && <ActionBtn onClick={() => setView("throw")}>🏹 Throw</ActionBtn>}
       <ActionBtn onClick={() => setView("stone")}>🔮 Stone of Intuition</ActionBtn>
       {identified && (
         <ActionBtn onClick={doClearIdent} className="text-red-400">✕ Clear identification</ActionBtn>
@@ -210,7 +222,7 @@ export function ItemActionSheet({ itemId, run, floor, probs, onUpdate, onClose }
   }
 
   if (view === "pickup") {
-    const available = sourcesForFloor(sources, floor);
+    const available = sourcesForFloor(sources, floor).filter(s => !s.id.startsWith("library_"));
     return (
       <Sheet onClose={onClose}>
         <Header />
@@ -279,7 +291,27 @@ export function ItemActionSheet({ itemId, run, floor, probs, onUpdate, onClose }
     </Sheet>
   );
 
+  if (view === "throw") return (
+    <Sheet onClose={onClose}>
+      <Header />
+      <p className="px-4 py-2 text-xs text-gray-500">What happened?</p>
+      <ActionBtn onClick={doThrowHarmless}>Splashes harmlessly (rules out: {THROW_EFFECT_TYPES.join(", ")})</ActionBtn>
+      <p className="px-4 pt-3 pb-1 text-xs text-gray-600 uppercase tracking-wide">Visible effect (identifies)</p>
+      {THROW_EFFECT_TYPES.map(name => (
+        <ActionBtn key={name} onClick={() => doIdentify(name)}>{name}</ActionBtn>
+      ))}
+      <ActionBtn onClick={() => setView("menu")} className="text-gray-500">← Back</ActionBtn>
+    </Sheet>
+  );
+
   return null;
+}
+
+function itemsForCategory(category) {
+  if (category === "weapon")  return WEAPON_ITEMS;
+  if (category === "armor")   return ARMOR_ITEMS;
+  if (category === "missile") return MISSILE_ITEMS;
+  return [];
 }
 
 // ── Gear action sheet ─────────────────────────────────────────────────────────
@@ -298,6 +330,7 @@ export function ItemActionSheet({ itemId, run, floor, probs, onUpdate, onClose }
 export function GearActionSheet({ pickup, run, floor, onUpdate, onClose }) {
   const [view, setView] = useState(pickup ? "menu" : "add_cat");
   const [category, setCategory] = useState(pickup?.category ?? null);
+  const [itemName, setItemName] = useState(pickup?.itemName ?? null);
 
   function mutate(updater) {
     onUpdate(updater({ ...run }));
@@ -310,11 +343,21 @@ export function GearActionSheet({ pickup, run, floor, onUpdate, onClose }) {
       gearPickups: [...r.gearPickups, {
         id: Date.now().toString(),
         category,
+        itemName,
         sourceId,
         floor,
         observedLevel: null,
         observedEffect: SOURCE_CONFIRMED_EFFECTS[sourceId] ?? null,
       }],
+    }));
+  }
+
+  function doSetItemName(name) {
+    mutate(r => ({
+      ...r,
+      gearPickups: r.gearPickups.map(g =>
+        g.id === pickup.id ? { ...g, itemName: name } : g
+      ),
     }));
   }
 
@@ -344,7 +387,7 @@ export function GearActionSheet({ pickup, run, floor, onUpdate, onClose }) {
     <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-800">
       <span className="text-xl">{pickup ? { weapon: "⚔️", armor: "🛡️", missile: "🏹", artifact: "🏺" }[pickup.category] : "🎒"}</span>
       <p className="text-sm font-semibold text-gray-100">
-        {pickup ? `${pickup.category} (F${pickup.floor})` : "Add gear"}
+        {pickup ? `${pickup.itemName ?? pickup.category} (F${pickup.floor})` : "Add gear"}
       </p>
       <button onClick={onClose} className="ml-auto text-gray-500 hover:text-gray-300 text-xl leading-none">×</button>
     </div>
@@ -355,12 +398,36 @@ export function GearActionSheet({ pickup, run, floor, onUpdate, onClose }) {
       <GearHeader />
       <p className="px-4 py-2 text-xs text-gray-500">Category</p>
       {GEAR_CATEGORIES.map(c => (
-        <ActionBtn key={c.id} onClick={() => { setCategory(c.id); setView("add_src"); }}>
+        <ActionBtn key={c.id} onClick={() => { setCategory(c.id); setView(c.id === "artifact" ? "add_src" : "add_item"); }}>
           {c.icon} {c.label}
         </ActionBtn>
       ))}
     </Sheet>
   );
+
+  if (view === "add_item") {
+    const items = itemsForCategory(category);
+    const tiers = [...new Set(items.map(i => i.tier))];
+    return (
+      <Sheet onClose={onClose}>
+        <GearHeader />
+        <ActionBtn onClick={() => { setItemName(null); setView("add_src"); }} className="text-gray-500">
+          Skip — unknown item
+        </ActionBtn>
+        {tiers.map(tier => (
+          <div key={tier}>
+            <p className="px-4 pt-3 pb-1 text-xs text-gray-600 uppercase tracking-wide">Tier {tier}</p>
+            {items.filter(i => i.tier === tier).map(i => (
+              <ActionBtn key={i.name} onClick={() => { setItemName(i.name); setView("add_src"); }}>
+                {i.name}
+              </ActionBtn>
+            ))}
+          </div>
+        ))}
+        <ActionBtn onClick={() => setView("add_cat")} className="text-gray-500">← Back</ActionBtn>
+      </Sheet>
+    );
+  }
 
   if (view === "add_src") return (
     <Sheet onClose={onClose}>
@@ -377,6 +444,13 @@ export function GearActionSheet({ pickup, run, floor, onUpdate, onClose }) {
     <Sheet onClose={onClose}>
       <GearHeader />
       {pickup.category !== "artifact" && (
+        <ActionBtn onClick={() => setView("edit_item")}>
+          {pickup.itemName
+            ? `✏️ Change item type (${pickup.itemName})`
+            : "Set item type"}
+        </ActionBtn>
+      )}
+      {pickup.category !== "artifact" && (
         <ActionBtn onClick={() => setView("level")}>
           {pickup.observedLevel
             ? `✏️ Change level (${pickup.observedLevel})`
@@ -391,6 +465,34 @@ export function GearActionSheet({ pickup, run, floor, onUpdate, onClose }) {
       <ActionBtn onClick={doRemove} className="text-red-400">🗑 Remove</ActionBtn>
     </Sheet>
   );
+
+  if (view === "edit_item") {
+    const items = itemsForCategory(pickup.category);
+    const tiers = [...new Set(items.map(i => i.tier))];
+    return (
+      <Sheet onClose={onClose}>
+        <GearHeader />
+        <ActionBtn onClick={() => doSetItemName(null)} className="text-gray-500">
+          Clear — unknown item
+        </ActionBtn>
+        {tiers.map(tier => (
+          <div key={tier}>
+            <p className="px-4 pt-3 pb-1 text-xs text-gray-600 uppercase tracking-wide">Tier {tier}</p>
+            {items.filter(i => i.tier === tier).map(i => (
+              <ActionBtn
+                key={i.name}
+                onClick={() => doSetItemName(i.name)}
+                className={i.name === pickup.itemName ? "text-yellow-400" : ""}
+              >
+                {i.name === pickup.itemName ? "✓ " : ""}{i.name}
+              </ActionBtn>
+            ))}
+          </div>
+        ))}
+        <ActionBtn onClick={() => setView("menu")} className="text-gray-500">← Back</ActionBtn>
+      </Sheet>
+    );
+  }
 
   if (view === "level") return (
     <Sheet onClose={onClose}>

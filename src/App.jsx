@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { computeProbabilities } from "./identifyEngine.js";
 import { computeGearProbabilities } from "./gearEngine.js";
 import { POTION_UNKNOWNS, SCROLL_UNKNOWNS } from "./items.js";
@@ -10,6 +10,8 @@ import { POTION_HINT_ROOMS } from "./specialRooms.js";
 import { RunSetup } from "./components/RunSetup.jsx";
 import { ItemActionSheet, GearActionSheet } from "./components/ActionSheet.jsx";
 import { LibraryRoomSheet } from "./components/LibraryRoomSheet.jsx";
+import { ShopSheet } from "./components/ShopSheet.jsx";
+import { SetCheckpointSheet, SET_CHECKPOINT_FLOORS } from "./components/SetCheckpointSheet.jsx";
 import { ItemSprite } from "./components/ItemSprite.jsx";
 import { ProbBar } from "./components/ProbBar.jsx";
 
@@ -17,28 +19,42 @@ import { ProbBar } from "./components/ProbBar.jsx";
 
 const STORAGE_KEY = "spdrun6";
 
-function storageLoad() {
+// localStorage (sync) — unchanged semantics
+function lsLoad() {
   try {
-    const raw = (typeof window !== "undefined" && window.storage)
-      ? window.storage.get(STORAGE_KEY)
-      : localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? loadRunState(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
 }
 
-function storageSave(run) {
+function lsSave(run) {
   try {
-    const s = JSON.stringify(saveRunState(run));
-    if (typeof window !== "undefined" && window.storage) {
-      window.storage.set(STORAGE_KEY, s);
-    } else {
-      localStorage.setItem(STORAGE_KEY, s);
-    }
-  } catch {
-    // storage not available
-  }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(saveRunState(run)));
+  } catch {}
+}
+
+// Server (async) — state object as clean JSON
+async function serverLoad() {
+  const res = await fetch("/api/run");
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data?.version === 1 ? data : null;
+}
+
+function serverSave(run) {
+  fetch("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(run),
+  }).catch(err => console.warn("[serverSave]", err));
+}
+
+// Combined — both targets on every save
+function storageSave(run) {
+  lsSave(run);
+  serverSave(run);
 }
 
 // ── Log helpers ────────────────────────────────────────────────────────────────
@@ -59,12 +75,23 @@ function buildLogEntries(run) {
     entries.push({ type: "stone", id: r.id, guessedName: r.guessedName, correct: r.correct, _ref: r });
   }
   for (const g of run.gearPickups) {
-    entries.push({ type: "gear", id: g.id, category: g.category, sourceId: g.sourceId, floor: g.floor, _ref: g });
+    entries.push({ type: "gear", id: g.id, category: g.category, itemName: g.itemName ?? null, sourceId: g.sourceId, floor: g.floor, _ref: g });
   }
   for (const h of run.hintRooms) {
     entries.push({ type: "hint", roomId: h.roomId, floor: h.floor, _ref: h });
   }
-  return entries.reverse();
+  for (const t of (run.thrownHarmless ?? [])) {
+    entries.push({ type: "thrown_harmless", id: t.id, floor: t.floor, _ref: t });
+  }
+  // Sort chronologically: by floor ascending, preserving insertion order within the same floor.
+  // Entries without a floor (e.g. stone results) sort to the end.
+  entries.forEach((e, i) => { e._seq = i; });
+  entries.sort((a, b) => {
+    const fa = a.floor ?? Infinity;
+    const fb = b.floor ?? Infinity;
+    return fa !== fb ? fa - fb : a._seq - b._seq;
+  });
+  return entries;
 }
 
 function undoLogEntry(entry, run) {
@@ -83,6 +110,8 @@ function undoLogEntry(entry, run) {
     r.gearPickups = r.gearPickups.filter(x => x.id !== entry.id);
   } else if (entry.type === "hint") {
     r.hintRooms = r.hintRooms.filter(x => x !== entry._ref);
+  } else if (entry.type === "thrown_harmless") {
+    r.thrownHarmless = (r.thrownHarmless ?? []).filter(x => x !== entry._ref);
   }
   return r;
 }
@@ -91,50 +120,167 @@ function undoLogEntry(entry, run) {
 
 const SOURCE_LABELS = {
   floor_drop: "floor drop", chest: "chest/skeleton", golden_chest: "golden chest",
-  tombstone: "tombstone (crypt)", flock_trap: "flock trap room", crystal_vault: "crystal vault",
-  armory: "armory", boss: "boss", other: "other", npc: "NPC", alchemy: "alchemy",
+  swarm: "swarm of flies", tombstone: "tombstone (crypt)", flock_trap: "trap room (prize chest)", sentry_room: "sentry room (chest)", crystal_vault: "crystal vault", crystal_path: "crystal path room", laboratory: "alchemy lab", secret_lab: "secret alchemy lab (hidden)",
+  armory: "armory", sacrifice_room: "sacrifice room", boss: "boss", other: "other", npc: "NPC", alchemy: "alchemy",
 };
 
-// ── ItemChip ───────────────────────────────────────────────────────────────────
+// ── Hint helpers ──────────────────────────────────────────────────────────────
 
-function ItemChip({ item, identified, probs, onClick }) {
+/** Build a floor → hint-room-list map from the run's hintRooms array. */
+function buildFloorHintMap(hintRooms) {
+  const map = new Map();
+  for (const h of hintRooms) {
+    const room = POTION_HINT_ROOMS.find(r => r.id === h.roomId);
+    if (!room) continue;
+    if (!map.has(h.floor)) map.set(h.floor, []);
+    map.get(h.floor).push(room);
+  }
+  return map;
+}
+
+/** Gather all hint lines for one item ID, sorted by floor. */
+function buildHintLines(id, kind, run, floorHintMap) {
+  const lines = [];
+  const pickups = (kind === "potion" ? run.potionPickups : run.scrollPickups) ?? [];
+
+  for (const p of pickups) {
+    if (p.id !== id) continue;
+    lines.push({
+      floor: p.floor,
+      kind: "pickup",
+      sourceLabel: SOURCE_LABELS[p.sourceId] ?? p.sourceId,
+      rooms: kind === "potion" ? (floorHintMap.get(p.floor) ?? []) : [],
+    });
+  }
+  for (const v of (run.shopVisits ?? [])) {
+    const ids = kind === "potion" ? v.potionIds : v.scrollIds;
+    if (!ids.includes(id)) continue;
+    lines.push({
+      floor: v.floor,
+      kind: "shop",
+      rooms: kind === "potion" ? (floorHintMap.get(v.floor) ?? []) : [],
+    });
+  }
+  if (kind === "scroll") {
+    for (const lib of (run.libraryRooms ?? [])) {
+      if (!lib.scrollIds.includes(id)) continue;
+      lines.push({ floor: lib.floor, kind: "library", rooms: [] });
+    }
+  }
+  if (kind === "potion") {
+    for (const t of (run.thrownHarmless ?? [])) {
+      if (t.id !== id) continue;
+      lines.push({ floor: t.floor, kind: "thrown", rooms: [] });
+    }
+  }
+  for (const r of (run.stoneResults ?? [])) {
+    if (r.id !== id) continue;
+    lines.push({ floor: null, kind: "stone", guessedName: r.guessedName, correct: r.correct });
+  }
+
+  lines.sort((a, b) => (a.floor ?? 9999) - (b.floor ?? 9999));
+  return lines;
+}
+
+// ── HintLine ──────────────────────────────────────────────────────────────────
+
+function HintLine({ line }) {
+  let text, cls;
+
+  if (line.kind === "pickup") {
+    text = `F${line.floor} · ${line.sourceLabel}`;
+    cls = "text-gray-400";
+  } else if (line.kind === "shop") {
+    text = `F${line.floor} · seen in shop`;
+    cls = "text-green-400/80";
+  } else if (line.kind === "library") {
+    text = `F${line.floor} · seen in library (Identify or Remove Curse)`;
+    cls = "text-blue-400/80";
+  } else if (line.kind === "thrown") {
+    text = `F${line.floor} · thrown → splashes harmlessly`;
+    cls = "text-red-400/80";
+  } else {
+    text = `Stone: guessed "${line.guessedName}" — ${line.correct ? "correct ✓" : "wrong ✗"}`;
+    cls = line.correct ? "text-yellow-400/80" : "text-red-400/80";
+  }
+
+  return (
+    <li className={`text-xs leading-relaxed ${cls}`}>
+      {text}
+      {(line.rooms ?? []).map(r => (
+        <span key={r.id} className="text-yellow-500/70">
+          {" · w/ "}{r.label} ({r.floorPotion} on floor)
+        </span>
+      ))}
+    </li>
+  );
+}
+
+// ── ItemCard ──────────────────────────────────────────────────────────────────
+
+function ItemCard({ item, kind, run, probs, floorHintMap, onClick }) {
+  const identified = run.identified[item.id] ?? null;
+  const hintLines = buildHintLines(item.id, kind, run, floorHintMap);
   const topProb = probs?.[0];
-  const candidateName = identified ?? topProb?.name ?? null;
-  const confidence = identified ? 1.0 : (topProb?.probability ?? 0);
-  const isIdentified = Boolean(identified);
 
   return (
     <button
       onClick={onClick}
-      className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition-all active:scale-95
-        ${isIdentified
-          ? "border-yellow-500 bg-gray-800"
-          : "border-gray-700 bg-gray-800/60"}`}
+      className={`w-full text-left p-3 border rounded-xl active:scale-[0.98] transition-all
+        ${identified ? "border-yellow-600/50 bg-gray-800" : "border-gray-700 bg-gray-800/60"}`}
     >
-      <ItemSprite sx={item.sx} sy={item.sy} scale={3} />
-      <span className="text-xs text-gray-400 leading-tight">{item.label}</span>
-      {candidateName && (
-        <span className={`text-xs leading-tight font-medium ${isIdentified ? "text-yellow-400" : "text-gray-300"}`}>
-          {candidateName}
-        </span>
-      )}
-      <ProbBar dist={isIdentified ? null : probs} />
+      <div className="flex items-start gap-3">
+        <div className="shrink-0 mt-0.5">
+          <ItemSprite sx={item.sx} sy={item.sy} scale={3} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2 mb-1">
+            <span className="text-sm font-semibold text-gray-200">{item.label}</span>
+            {identified && (
+              <span className="text-xs text-yellow-400 font-medium">{identified}</span>
+            )}
+            {!identified && topProb && (
+              <span className="text-xs text-gray-500 ml-auto shrink-0">
+                {topProb.name} {Math.round(topProb.probability * 100)}%
+              </span>
+            )}
+          </div>
+
+          {hintLines.length === 0 ? (
+            <p className="text-xs text-gray-600 italic">Not seen yet</p>
+          ) : (
+            <ul className="flex flex-col gap-0.5">
+              {hintLines.map((line, i) => <HintLine key={i} line={line} />)}
+            </ul>
+          )}
+
+          {!identified && probs && probs.length > 0 && (
+            <div className="mt-2">
+              <ProbBar dist={probs} />
+            </div>
+          )}
+        </div>
+      </div>
     </button>
   );
 }
 
 // ── ItemsTab ───────────────────────────────────────────────────────────────────
 
-function ItemsTab({ kind, run, floor, probs, onChipTap }) {
+function ItemsTab({ kind, run, probs, onChipTap }) {
   const items = kind === "potion" ? POTION_UNKNOWNS : SCROLL_UNKNOWNS;
+  const floorHintMap = buildFloorHintMap(run.hintRooms ?? []);
+
   return (
-    <div className="grid grid-cols-3 gap-2 p-3">
+    <div className="flex flex-col gap-2 p-3">
       {items.map(item => (
-        <ItemChip
+        <ItemCard
           key={item.id}
           item={item}
-          identified={run.identified[item.id] ?? null}
+          kind={kind}
+          run={run}
           probs={probs?.[item.id] ?? null}
+          floorHintMap={floorHintMap}
           onClick={() => onChipTap(item.id)}
         />
       ))}
@@ -156,7 +302,7 @@ function GearCard({ pickup, run, onClick }) {
     >
       <div className="flex items-center gap-2 mb-2">
         <span className="text-lg">{CATEGORY_ICONS[pickup.category]}</span>
-        <span className="text-sm font-semibold text-gray-100 capitalize">{pickup.category}</span>
+        <span className="text-sm font-semibold text-gray-100 capitalize">{pickup.itemName ?? pickup.category}</span>
         <span className="text-xs text-gray-500 ml-auto">F{pickup.floor} · {SOURCE_LABELS[pickup.sourceId] ?? pickup.sourceId}</span>
       </div>
 
@@ -242,10 +388,12 @@ function LogEntryRow({ entry, run, onUndo }) {
   } else if (entry.type === "stone") {
     label = `Stone: ${item?.label ?? entry.id} guessed "${entry.guessedName}" — ${entry.correct ? "correct" : "wrong"}`;
   } else if (entry.type === "gear") {
-    label = `Found ${entry.category} on F${entry.floor} (${SOURCE_LABELS[entry.sourceId] ?? entry.sourceId})`;
+    label = `Found ${entry.itemName ?? entry.category} on F${entry.floor} (${SOURCE_LABELS[entry.sourceId] ?? entry.sourceId})`;
   } else if (entry.type === "hint") {
     const room = POTION_HINT_ROOMS.find(r => r.id === entry.roomId);
-    label = `Saw ${room?.name ?? entry.roomId} on F${entry.floor}`;
+    label = `Saw ${room?.label ?? entry.roomId} on F${entry.floor}`;
+  } else if (entry.type === "thrown_harmless") {
+    label = `Threw ${item?.label ?? entry.id} on F${entry.floor} → splashes harmlessly`;
   }
 
   return (
@@ -307,7 +455,7 @@ function HintRoomPicker({ floor, run, onClose, onUpdate }) {
             className={`w-full text-left px-4 py-3 text-sm border-b border-gray-800 transition-colors
               ${activeOnFloor.includes(room.id) ? "text-yellow-400 bg-gray-800" : "text-gray-300 hover:bg-gray-800"}`}
           >
-            {activeOnFloor.includes(room.id) ? "✓ " : ""}{room.name}
+            {activeOnFloor.includes(room.id) ? "✓ " : ""}{room.label}
           </button>
         ))}
       </div>
@@ -319,9 +467,10 @@ function HintRoomPicker({ floor, run, onClose, onUpdate }) {
 
 const FLOORS = Array.from({ length: 26 }, (_, i) => i + 1);
 
-function Header({ floor, run, onFloorChange, onNewRun, onRoomPickerOpen, onLibraryAdd, onLibraryEdit, onLibraryRemove }) {
+function Header({ floor, run, onFloorChange, onNewRun, onRoomPickerOpen, onLibraryAdd, onLibraryEdit, onLibraryRemove, onShopAdd, onShopEdit, onShopRemove }) {
   const activeHintRooms = run.hintRooms.filter(h => h.floor === floor);
   const activeLibraryRooms = (run.libraryRooms ?? []).filter(l => l.floor === floor);
+  const activeShopVisits = (run.shopVisits ?? []).filter(v => v.floor === floor);
 
   return (
     <div className="sticky top-0 z-30 bg-gray-950 border-b border-gray-800">
@@ -352,7 +501,7 @@ function Header({ floor, run, onFloorChange, onNewRun, onRoomPickerOpen, onLibra
           const room = POTION_HINT_ROOMS.find(r => r.id === h.roomId);
           return (
             <span key={h.roomId} className="shrink-0 px-2 py-0.5 bg-yellow-900/40 border border-yellow-700/50 text-yellow-300 text-xs rounded-full">
-              {room?.name ?? h.roomId}
+              {room?.label ?? h.roomId}
             </span>
           );
         })}
@@ -387,6 +536,31 @@ function Header({ floor, run, onFloorChange, onNewRun, onRoomPickerOpen, onLibra
           className="shrink-0 px-2 py-0.5 border border-gray-700 text-gray-500 text-xs rounded-full hover:border-blue-600 hover:text-blue-400 transition-colors"
         >
           + library
+        </button>
+        {activeShopVisits.map((visit, i) => {
+          const potionCount = visit.potionIds.length;
+          const scrollCount = visit.scrollIds.length;
+          return (
+            <span
+              key={i}
+              className="shrink-0 flex items-center gap-1 pl-2 pr-1 py-0.5 bg-green-900/40 border border-green-700/50 text-green-300 text-xs rounded-full cursor-pointer hover:border-green-500"
+              onClick={() => onShopEdit(visit)}
+            >
+              🏪 {potionCount}p {scrollCount}s
+              <button
+                onClick={e => { e.stopPropagation(); onShopRemove(visit); }}
+                className="text-green-500 hover:text-red-400 ml-0.5 leading-none"
+              >
+                ×
+              </button>
+            </span>
+          );
+        })}
+        <button
+          onClick={onShopAdd}
+          className="shrink-0 px-2 py-0.5 border border-gray-700 text-gray-500 text-xs rounded-full hover:border-green-600 hover:text-green-400 transition-colors"
+        >
+          + shop
         </button>
       </div>
     </div>
@@ -423,18 +597,51 @@ function TabBar({ active, onChange }) {
 // ── Main App ───────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [run, setRunRaw] = useState(() => storageLoad() ?? null);
+  const [run, setRunRaw] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [floor, setFloor] = useState(1);
   const [tab, setTab] = useState("potions");
   const [sheet, setSheet] = useState(null); // { type: "item", id } | { type: "gear_add" } | { type: "gear_edit", pickup }
   const [showRoomPicker, setShowRoomPicker] = useState(false);
   const [librarySheet, setLibrarySheet] = useState(null); // null | { existing: string[]|null }
+  const [shopSheet, setShopSheet] = useState(null); // null | { existing: {potionIds,scrollIds}|null }
+  const [setCheckpoint, setSetCheckpoint] = useState(null); // null | { set: number }
   const [confirmNewRun, setConfirmNewRun] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    serverLoad()
+      .then(serverRun => {
+        if (!cancelled) setRunRaw(serverRun ?? lsLoad() ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setRunRaw(lsLoad() ?? null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   function setRun(updated) {
     setRunRaw(updated);
     storageSave(updated);
   }
+
+  // Keep a ref to the latest run so the floor-change effect reads it without
+  // being listed as a dep (prevents spurious re-triggers when run mutates).
+  const runRef = useRef(run);
+  useEffect(() => { runRef.current = run; }, [run]);
+
+  // Auto-show the set-checkpoint sheet when the player enters a new floor set.
+  useEffect(() => {
+    const currentRun = runRef.current;
+    if (!currentRun) return;
+    const setNum = SET_CHECKPOINT_FLOORS[floor];
+    if (!setNum) return;
+    if ((currentRun.acknowledgedSets ?? []).includes(setNum)) return;
+    setSetCheckpoint({ set: setNum });
+  }, [floor]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Compute probabilities from run state
   const probs = useMemo(() => {
@@ -470,6 +677,14 @@ export default function App() {
     setRun(undoLogEntry(entry, run));
   }
 
+  if (loading) {
+    return (
+      <div className="min-h-dvh bg-gray-950 flex items-center justify-center">
+        <p className="text-sm text-gray-500">Loading…</p>
+      </div>
+    );
+  }
+
   // Show RunSetup if no run or if user wants a new run
   if (!run || confirmNewRun) {
     return <RunSetup onComplete={handleRunComplete} />;
@@ -489,6 +704,12 @@ export default function App() {
           ...run,
           libraryRooms: run.libraryRooms.filter(l => l !== lib),
         })}
+        onShopAdd={() => setShopSheet({ existing: null })}
+        onShopEdit={visit => setShopSheet({ existing: visit })}
+        onShopRemove={visit => setRun({
+          ...run,
+          shopVisits: (run.shopVisits ?? []).filter(v => v !== visit),
+        })}
       />
 
       <div className="flex-1 overflow-y-auto pb-2">
@@ -496,7 +717,6 @@ export default function App() {
           <ItemsTab
             kind="potion"
             run={run}
-            floor={floor}
             probs={itemProbMap}
             onChipTap={id => setSheet({ type: "item", id })}
           />
@@ -505,7 +725,6 @@ export default function App() {
           <ItemsTab
             kind="scroll"
             run={run}
-            floor={floor}
             probs={itemProbMap}
             onChipTap={id => setSheet({ type: "item", id })}
           />
@@ -562,6 +781,27 @@ export default function App() {
           run={run}
           onUpdate={updated => { setRun(updated); }}
           onClose={() => setLibrarySheet(null)}
+        />
+      )}
+
+      {/* Shop sheet */}
+      {shopSheet && (
+        <ShopSheet
+          floor={floor}
+          existing={shopSheet.existing}
+          run={run}
+          onUpdate={updated => { setRun(updated); }}
+          onClose={() => setShopSheet(null)}
+        />
+      )}
+
+      {/* Floor-set checkpoint sheet (SOU / POS identification) */}
+      {setCheckpoint && (
+        <SetCheckpointSheet
+          set={setCheckpoint.set}
+          run={run}
+          onUpdate={updated => { setRun(updated); }}
+          onClose={() => setSetCheckpoint(null)}
         />
       )}
 
